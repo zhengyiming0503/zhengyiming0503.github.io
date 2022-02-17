@@ -308,6 +308,51 @@
       </tags>
   </entry>
   <entry>
+    <title>teamtalk学习笔记4：线程池封装</title>
+    <url>/2021/10/13/teamtalk%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B04%EF%BC%9A%E7%BA%BF%E7%A8%8B%E6%B1%A0%E5%B0%81%E8%A3%85/</url>
+    <content><![CDATA[<p>teamtalk 中 http 任务队列用到了一个线程池，通过这篇文章来看下是怎么封装的</p>
+<ul>
+<li>IHttpPoolModule：http 线程池抽象类</li>
+<li>HttpPoolModule_Impl：http 线程池接口实现类</li>
+<li>IHttpOperation：http 任务抽象类</li>
+<li>TTThread：线程类封装</li>
+<li>TTHttpThread：Http 线程类</li>
+</ul>
+<p>这几个是线程池模块使用到的类。</p>
+<img src="./tt14.png" width="75%" height="75%" />
+
+<p><em><strong>线程封装</strong></em></p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">class UTILITY_CLASS TTThread</span><br><span class="line">&#123;</span><br><span class="line">public:</span><br><span class="line">    /** @name Constructors and Destructor*/</span><br><span class="line"></span><br><span class="line">    //@&#123;</span><br><span class="line">    /**</span><br><span class="line">     * Constructor </span><br><span class="line">     */</span><br><span class="line">    TTThread();</span><br><span class="line">    /**</span><br><span class="line">     * Destructor</span><br><span class="line">     */</span><br><span class="line">    ~TTThread();</span><br><span class="line">    //@&#125;</span><br><span class="line"></span><br><span class="line">public:</span><br><span class="line">	BOOL create();</span><br><span class="line">	void destory();</span><br><span class="line">	BOOL wait(DWORD dwWaitTime);</span><br><span class="line">	inline DWORD getThreadId() &#123; return m_dwThreadID; &#125;</span><br><span class="line"></span><br><span class="line">protected:</span><br><span class="line">	virtual UInt32 process();</span><br><span class="line"></span><br><span class="line">private:</span><br><span class="line">	static UInt32 __stdcall _threadProc(void *lpParam);</span><br><span class="line"></span><br><span class="line">private:</span><br><span class="line">	HANDLE		m_hThread;</span><br><span class="line">	DWORD		m_dwThreadID;</span><br><span class="line">&#125;;</span><br><span class="line"></span><br></pre></td></tr></table></figure>
+
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">BOOL TTThread::create()</span><br><span class="line">&#123;</span><br><span class="line">	m_hThread = (HANDLE)_beginthreadex(0,0, _threadProc, this, 0, (unsigned*)&amp;m_dwThreadID);</span><br><span class="line"></span><br><span class="line">	if (m_hThread &lt; (HANDLE)2)</span><br><span class="line">	&#123;</span><br><span class="line">		m_hThread = 0;</span><br><span class="line">		m_dwThreadID = 0;</span><br><span class="line">	&#125;</span><br><span class="line"></span><br><span class="line">	return m_hThread &gt;(HANDLE)1;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>调用系统函数 <code>_beginthreadex</code> 创建线程，线程函数为 <code>_threadProc</code>。</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">UInt32 __stdcall TTThread::_threadProc(void *lpParam)</span><br><span class="line">&#123;</span><br><span class="line">	TTThread* pThread = (TTThread*)lpParam;</span><br><span class="line">	assert(pThread);</span><br><span class="line">	if (pThread != 0)</span><br><span class="line">	&#123;</span><br><span class="line">		pThread-&gt;process();</span><br><span class="line">	&#125;</span><br><span class="line">	return 0;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>在 <code>_threadProc</code> 调用了 <code>process</code>，所以最终执行的线程函数为 <code>process</code>。所以我们使用的时候，只需要从 TTThread 派生出一个类，重写 <code>process</code> 函数，然后 <code>create</code> 创建线程即可。</p>
+<p><em><strong>投递任务到任务队列</strong></em></p>
+<p>线程池模块 <code>HttpPoolModule_Impl</code> 管理两个队列，一个任务队列，一个线程队列。</p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">void HttpPoolModule_Impl::pushHttpOperation(module::IHttpOperation* pOperaion, BOOL bHighPriority /*= FALSE*/)</span><br><span class="line">&#123;</span><br><span class="line">	if (NULL == pOperaion)</span><br><span class="line">	&#123;</span><br><span class="line">		return;</span><br><span class="line">	&#125;</span><br><span class="line"></span><br><span class="line">    // 队列不是线程安全的所有需要加锁</span><br><span class="line">    // 使用信号量维护线程同步，信号量 + 1</span><br><span class="line">	CAutoLock lock(&amp;m_mtxLock);</span><br><span class="line">	if (bHighPriority)</span><br><span class="line">		m_lstHttpOpers.push_front(pOperaion);</span><br><span class="line">	else</span><br><span class="line">		m_lstHttpOpers.push_back(pOperaion);</span><br><span class="line">	_launchThread();</span><br><span class="line">	::ReleaseSemaphore(m_hSemaphore, 1, NULL);</span><br><span class="line"></span><br><span class="line">	return;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line">BOOL HttpPoolModule_Impl::_launchThread()</span><br><span class="line">&#123;</span><br><span class="line">	if ((int)m_vecHttpThread.size() &gt;= MAX_THEAD_COUNT)</span><br><span class="line">	&#123;</span><br><span class="line">		return TRUE;</span><br><span class="line">	&#125;</span><br><span class="line">	</span><br><span class="line">	// 当线程池里的线程数没超过阈值，就增加线程</span><br><span class="line">	TTHttpThread* pThread = new TTHttpThread();</span><br><span class="line">	PTR_FALSE(pThread);</span><br><span class="line">	if (!pThread-&gt;create())</span><br><span class="line">	&#123;</span><br><span class="line">		return FALSE;</span><br><span class="line">	&#125;</span><br><span class="line">	Sleep(300);</span><br><span class="line"></span><br><span class="line">	m_vecHttpThread.push_back(pThread);</span><br><span class="line"></span><br><span class="line">	return TRUE;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>就做了两件事：</p>
+<ol>
+<li>投递任务到任务队列，信号量计数加 1。</li>
+<li>判断当前线程池里的线程数，如果没超过阈值，就增加一个线程，放到线程池的队列中。</li>
+</ol>
+<p><em><strong>线程函数</strong></em></p>
+<figure class="highlight plaintext"><table><tr><td class="code"><pre><span class="line">UInt32 TTHttpThread::process()</span><br><span class="line">&#123;</span><br><span class="line">	module::IHttpOperation * pHttpOper = NULL;</span><br><span class="line">	HttpPoolModule_Impl *pPool = m_pInstance;</span><br><span class="line">	while (m_bContinue)</span><br><span class="line">	&#123;</span><br><span class="line">		if (WAIT_OBJECT_0 != ::WaitForSingleObject(pPool-&gt;m_hSemaphore, INFINITE))</span><br><span class="line">		&#123;</span><br><span class="line">			break;</span><br><span class="line">		&#125;</span><br><span class="line"></span><br><span class="line">		if (!m_bContinue)</span><br><span class="line">		&#123;</span><br><span class="line">			break;</span><br><span class="line">		&#125;</span><br><span class="line"></span><br><span class="line">		&#123;</span><br><span class="line">			CAutoLock lock(&amp;(pPool-&gt;m_mtxLock));</span><br><span class="line">			if (pPool-&gt;m_lstHttpOpers.empty())</span><br><span class="line">				pHttpOper = NULL;</span><br><span class="line">			else</span><br><span class="line">			&#123;</span><br><span class="line">				pHttpOper = pPool-&gt;m_lstHttpOpers.front();</span><br><span class="line">				pPool-&gt;m_lstHttpOpers.pop_front();</span><br><span class="line">			&#125;</span><br><span class="line">		&#125;</span><br><span class="line"></span><br><span class="line">		try</span><br><span class="line">		&#123;</span><br><span class="line">			if (m_bContinue &amp;&amp; pHttpOper)</span><br><span class="line">			&#123;</span><br><span class="line">				pHttpOper-&gt;process();</span><br><span class="line">				pHttpOper-&gt;release();</span><br><span class="line">			&#125;</span><br><span class="line">		&#125;</span><br><span class="line">		catch (...)</span><br><span class="line">		&#123;</span><br><span class="line">			LOG__(ERR, _T(&quot;TTHttpThread: Failed to execute opertaion(0x%p)&quot;), pHttpOper);</span><br><span class="line">		&#125;</span><br><span class="line">	&#125;</span><br><span class="line"></span><br><span class="line">	return 0;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>当信号量计数小于等于 0 的时候，线程阻塞在 WaitForSingleObject 等待唤醒。</p>
+<p>线程唤醒后，去任务队列取任务，然后执行。</p>
+]]></content>
+      <categories>
+        <category>C++</category>
+      </categories>
+      <tags>
+        <tag>teamtalk</tag>
+      </tags>
+  </entry>
+  <entry>
     <title>Http 知识点</title>
     <url>/2021/10/28/Http%20%E7%9F%A5%E8%AF%86%E7%82%B9/</url>
     <content><![CDATA[<h1 id="HTTP-基本概念"><a href="#HTTP-基本概念" class="headerlink" title="HTTP 基本概念"></a>HTTP 基本概念</h1><blockquote>
